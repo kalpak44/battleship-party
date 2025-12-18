@@ -5,6 +5,13 @@ const el = {
     lang: $("lang"),
     screenHome: $("screenHome"),
     screenGame: $("screenGame"),
+    roomInfo: $("roomInfo"),
+    roomCode: $("roomCode"),
+    btnCopyRoom: $("btnCopyRoom"),
+    btnShareRoom: $("btnShareRoom"),
+    roomInfoMobile: $("roomInfoMobile"),
+    roomCodeMobile: $("roomCodeMobile"),
+    btnCopyRoomMobile: $("btnCopyRoomMobile"),
     lblName: $("lblName"),
     lblRoomId: $("lblRoomId"),
     btnCreate: $("btnCreate"),
@@ -52,6 +59,92 @@ let myState = makeEmptyBoard();    // for display: 0 water, 1 ship, 2 hit, -1 mi
 let enemyState = makeEmptyBoard(); // only hits/misses on enemy
 let yourTurn = false;
 
+function setConnecting(isConnecting, hintText) {
+    const hint = hintText || (UI.connecting || "Connecting…");
+    if (el.btnCreate) el.btnCreate.disabled = !!isConnecting;
+    if (el.btnJoin) el.btnJoin.disabled = !!isConnecting;
+    if (el.connHint) el.connHint.textContent = isConnecting ? hint : (UI.open_two || "Open this page in two browser tabs/windows to play.");
+}
+
+function shareUrlFor(roomId) {
+    try {
+        const base = `${location.origin}${location.pathname}`;
+        const url = new URL(base);
+        url.searchParams.set("room", roomId);
+        return url.toString();
+    } catch {
+        return `${location.origin}${location.pathname}?room=${roomId}`;
+    }
+}
+
+function updateRoomShareUI() {
+    const hasRoom = !!ROOM_ID;
+    const code = hasRoom ? ROOM_ID : "—";
+    if (el.roomCode) el.roomCode.textContent = code;
+    if (el.roomCodeMobile) el.roomCodeMobile.textContent = code;
+
+    // Show Share button only if available
+    const canShare = typeof navigator !== "undefined" && !!navigator.share;
+    if (el.btnShareRoom) {
+        if (canShare) el.btnShareRoom.classList.remove("hidden");
+        else el.btnShareRoom.classList.add("hidden");
+    }
+
+    // Wire copy buttons once
+    const doCopy = async () => {
+        if (!ROOM_ID) return;
+        const link = shareUrlFor(ROOM_ID);
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(link);
+            } else {
+                const ta = document.createElement("textarea");
+                ta.value = link;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                document.body.removeChild(ta);
+            }
+            toast(UI.copied || "Link copied");
+        } catch {
+            toast(UI.copy_failed || "Copy failed");
+        }
+    };
+
+    const doShare = async () => {
+        if (!ROOM_ID) return;
+        const link = shareUrlFor(ROOM_ID);
+        try {
+            if (navigator.share) {
+                await navigator.share({
+                    title: UI.title || "Battleship",
+                    text: UI.share_text || "Join my Battleship room",
+                    url: link,
+                });
+            } else {
+                await doCopy();
+            }
+        } catch (_) {
+            // user canceled; ignore
+        }
+    };
+
+    if (el.btnCopyRoom && !el.btnCopyRoom._wired) {
+        el.btnCopyRoom._wired = true;
+        el.btnCopyRoom.addEventListener("click", doCopy);
+    }
+    if (el.btnCopyRoomMobile && !el.btnCopyRoomMobile._wired) {
+        el.btnCopyRoomMobile._wired = true;
+        el.btnCopyRoomMobile.addEventListener("click", doCopy);
+    }
+    if (el.btnShareRoom && !el.btnShareRoom._wired) {
+        el.btnShareRoom._wired = true;
+        el.btnShareRoom.addEventListener("click", doShare);
+    }
+
+    // Update hint on home if we have code (optional)
+}
+
 function showScreen(which) {
     if (!el.screenHome || !el.screenGame) return;
     if (which === "game") {
@@ -89,6 +182,8 @@ function resetToHome() {
     // remove room param from URL
     try { history.replaceState(null, "", location.pathname); } catch (_) {}
     showScreen("home");
+    setConnecting(false);
+    updateRoomShareUI();
 }
 
 function toast(msg) {
@@ -424,6 +519,18 @@ function setTexts() {
     el.lblMyBoard.textContent = UI.my_board || "My board";
     el.lblEnemyBoard.textContent = UI.enemy_board || "Enemy board";
     el.enemyHint.textContent = phase === "battle" ? "" : (UI.lobby_ready_hint || "");
+    // Optional room label text updates
+    if (el.roomInfo) {
+        const labelSpan = el.roomInfo.querySelector("span");
+        if (labelSpan) labelSpan.textContent = UI.room || "Room";
+    }
+    if (el.roomInfoMobile) {
+        const labelSpan = el.roomInfoMobile.querySelector("span");
+        if (labelSpan) labelSpan.textContent = UI.room || "Room";
+    }
+    if (el.btnCopyRoom) el.btnCopyRoom.textContent = UI.copy || "Copy";
+    if (el.btnShareRoom) el.btnShareRoom.textContent = UI.share || "Share";
+    if (el.btnCopyRoomMobile) el.btnCopyRoomMobile.textContent = UI.copy || "Copy";
 }
 
 function setStatus(main, sub="") {
@@ -445,6 +552,7 @@ function setStatus(main, sub="") {
 function connect(roomId, lang, name) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws/${roomId}`);
+    setConnecting(true);
 
     ws.onopen = () => {
         ws.send(JSON.stringify({ type: "join", lang, name }));
@@ -455,6 +563,8 @@ function connect(roomId, lang, name) {
 
         if (msg.type === "error") {
             toast(msg.message || "Error");
+            // if we aren't initialized yet, allow retry from Home
+            if (!ROOM_ID || phase === "disconnected") setConnecting(false);
             return;
         }
         if (msg.type === "info") {
@@ -475,11 +585,15 @@ function connect(roomId, lang, name) {
 
             // show link in roomId
             el.roomId.value = ROOM_ID;
+            // Update URL to contain shareable room parameter
+            try { history.replaceState(null, "", `${location.pathname}?room=${ROOM_ID}`); } catch (_) {}
+            updateRoomShareUI();
             phase = "lobby";
             setStatus(UI.place_ships || "Place ships", UI.waiting_opponent || "");
             renderFleet();
             renderBoards();
             showScreen("game");
+            setConnecting(false);
             return;
         }
 
@@ -595,6 +709,7 @@ function connect(roomId, lang, name) {
         setStatus("Disconnected", "");
         // Return to home if connection drops
         showScreen("home");
+        setConnecting(false);
     };
 }
 
@@ -653,6 +768,7 @@ el.btnCreate.onclick = async () => {
     const lang = el.lang.value;
     const name = el.name.value.trim();
     if (!name) return toast(UI.enter_name || "Enter name");
+    setConnecting(true, UI.creating_room || "Creating room…");
     const r = await fetch(`/create/${lang}`, { method: "POST" });
     const data = await r.json();
     el.roomId.value = data.room_id;
@@ -665,6 +781,7 @@ el.btnJoin.onclick = async () => {
     const roomId = el.roomId.value.trim();
     if (!name) return toast(UI.enter_name || "Enter name");
     if (!roomId) return toast("Room ID required");
+    setConnecting(true);
     connect(roomId, lang, name);
 };
 

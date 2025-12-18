@@ -1,0 +1,483 @@
+const $ = (id) => document.getElementById(id);
+
+const el = {
+    title: $("title"),
+    lang: $("lang"),
+    copyLink: $("copyLink"),
+    lblName: $("lblName"),
+    lblRoomId: $("lblRoomId"),
+    btnCreate: $("btnCreate"),
+    btnJoin: $("btnJoin"),
+    name: $("name"),
+    roomId: $("roomId"),
+    connHint: $("connHint"),
+    status: $("status"),
+    substatus: $("substatus"),
+    lblOrientation: $("lblOrientation"),
+    btnOrient: $("btnOrient"),
+    btnClear: $("btnClear"),
+    btnReady: $("btnReady"),
+    myBoard: $("myBoard"),
+    enemyBoard: $("enemyBoard"),
+    fleetLabel: $("fleetLabel"),
+    fleet: $("fleet"),
+    enemyHint: $("enemyHint"),
+    toast: $("toast"),
+    lblMyBoard: $("lblMyBoard"),
+    lblEnemyBoard: $("lblEnemyBoard"),
+};
+
+let ws = null;
+let ROOM_ID = null;
+let PID = null;
+
+let UI = {};
+let FLEET = [];
+let BOARD_SIZE = 10;
+
+let phase = "disconnected"; // disconnected|lobby|battle|game_over
+let orientation = "H"; // H|V
+let selectedShipIdx = 0; // which ship length from fleet is being placed
+let myPlacement = makeEmptyBoard(); // 0/1
+let myPlaced = false;
+let myReady = false;
+
+let myState = makeEmptyBoard();    // for display: 0 water, 1 ship, 2 hit, -1 miss
+let enemyState = makeEmptyBoard(); // only hits/misses on enemy
+let yourTurn = false;
+
+function toast(msg) {
+    el.toast.textContent = msg;
+    el.toast.classList.remove("hidden");
+    setTimeout(() => el.toast.classList.add("hidden"), 1600);
+}
+
+function makeEmptyBoard() {
+    return Array.from({ length: BOARD_SIZE }, () => Array.from({ length: BOARD_SIZE }, () => 0));
+}
+
+function isIn(x, y) {
+    return x >= 0 && y >= 0 && x < BOARD_SIZE && y < BOARD_SIZE;
+}
+
+function neighbors8(x, y) {
+    const out = [];
+    for (let dy of [-1, 0, 1]) {
+        for (let dx of [-1, 0, 1]) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx, ny = y + dy;
+            if (isIn(nx, ny)) out.push([nx, ny]);
+        }
+    }
+    return out;
+}
+
+// Validate placement rules: straight ships, fleet exact, no diagonal/side touch across ships
+function validateFleet(board, fleet) {
+    // components with 4-neighborhood
+    const vis = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(false));
+    const comps = [];
+
+    function dfs(sx, sy) {
+        const stack = [[sx, sy]];
+        vis[sy][sx] = true;
+        const comp = [];
+        while (stack.length) {
+            const [x, y] = stack.pop();
+            comp.push([x, y]);
+            for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                const nx = x + dx, ny = y + dy;
+                if (isIn(nx, ny) && !vis[ny][nx] && board[ny][nx] === 1) {
+                    vis[ny][nx] = true;
+                    stack.push([nx, ny]);
+                }
+            }
+        }
+        return comp;
+    }
+
+    for (let y = 0; y < BOARD_SIZE; y++) {
+        for (let x = 0; x < BOARD_SIZE; x++) {
+            if (board[y][x] === 1 && !vis[y][x]) {
+                comps.push(dfs(x, y));
+            }
+        }
+    }
+
+    // line & contiguous + gather lengths
+    const lengths = [];
+    const compId = new Map();
+    comps.forEach((comp, i) => comp.forEach(([x,y]) => compId.set(`${x},${y}`, i)));
+
+    for (const comp of comps) {
+        const xs = new Set(comp.map(([x,_]) => x));
+        const ys = new Set(comp.map(([_,y]) => y));
+        if (xs.size !== 1 && ys.size !== 1) return false;
+
+        if (xs.size === 1) {
+            const x = [...xs][0];
+            const ysSorted = comp.map(([_,y]) => y).sort((a,b)=>a-b);
+            for (let i=1;i<ysSorted.length;i++) if (ysSorted[i] !== ysSorted[0]+i) return false;
+            // ensure all have same x already
+            if (!comp.every(([cx,_]) => cx === x)) return false;
+        } else {
+            const y = [...ys][0];
+            const xsSorted = comp.map(([x,_]) => x).sort((a,b)=>a-b);
+            for (let i=1;i<xsSorted.length;i++) if (xsSorted[i] !== xsSorted[0]+i) return false;
+            if (!comp.every(([_,cy]) => cy === y)) return false;
+        }
+        lengths.push(comp.length);
+    }
+
+    // no touching across different comps (8-neighborhood)
+    for (let y = 0; y < BOARD_SIZE; y++) {
+        for (let x = 0; x < BOARD_SIZE; x++) {
+            if (board[y][x] !== 1) continue;
+            for (const [nx, ny] of neighbors8(x, y)) {
+                if (board[ny][nx] === 1 && compId.get(`${nx},${ny}`) !== compId.get(`${x},${y}`)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    const want = [...fleet].sort((a,b)=>a-b);
+    const got = [...lengths].sort((a,b)=>a-b);
+    if (want.length !== got.length) return false;
+    for (let i=0;i<want.length;i++) if (want[i] !== got[i]) return false;
+
+    return true;
+}
+
+function renderBoards() {
+    el.myBoard.innerHTML = "";
+    el.enemyBoard.innerHTML = "";
+
+    // My board shows ships + hits/misses
+    for (let y = 0; y < BOARD_SIZE; y++) {
+        for (let x = 0; x < BOARD_SIZE; x++) {
+            const v = myState[y][x];
+            const cell = document.createElement("button");
+            cell.className = baseCellClass();
+            cell.title = `${x},${y}`;
+
+            // colors by state (tailwind classes)
+            if (v === 1) cell.classList.add("bg-slate-700");
+            else if (v === 2) cell.classList.add("bg-rose-700");
+            else if (v === -1) cell.classList.add("bg-slate-800");
+            else cell.classList.add("bg-slate-900");
+
+            // placement click in lobby
+            cell.onclick = () => {
+                if (phase !== "lobby") return;
+                if (myReady) return;
+                placeAt(x, y);
+            };
+
+            el.myBoard.appendChild(cell);
+        }
+    }
+
+    // Enemy board shows only shot marks. Click to shoot in battle
+    for (let y = 0; y < BOARD_SIZE; y++) {
+        for (let x = 0; x < BOARD_SIZE; x++) {
+            const v = enemyState[y][x];
+            const cell = document.createElement("button");
+            cell.className = baseCellClass();
+            cell.title = `${x},${y}`;
+
+            if (v === 2) cell.classList.add("bg-rose-700");
+            else if (v === -1) cell.classList.add("bg-slate-800");
+            else cell.classList.add("bg-slate-900");
+
+            cell.onclick = () => {
+                if (phase !== "battle") return;
+                if (!yourTurn) return;
+                if (enemyState[y][x] === 2 || enemyState[y][x] === -1) return;
+                ws.send(JSON.stringify({ type: "shot", x, y }));
+            };
+
+            el.enemyBoard.appendChild(cell);
+        }
+    }
+}
+
+function baseCellClass() {
+    return "w-8 h-8 md:w-9 md:h-9 rounded-md border border-slate-800 hover:border-slate-600 transition";
+}
+
+function renderFleet() {
+    el.fleet.innerHTML = "";
+    FLEET.forEach((len, idx) => {
+        const b = document.createElement("button");
+        b.className = "px-2 py-1 rounded border text-sm " + (idx === selectedShipIdx ? "bg-slate-700 border-slate-500" : "bg-slate-900 border-slate-800 hover:bg-slate-800");
+        b.textContent = `${len}`;
+        b.onclick = () => { selectedShipIdx = idx; renderFleet(); };
+        el.fleet.appendChild(b);
+    });
+}
+
+function clearPlacement() {
+    myPlacement = makeEmptyBoard();
+    myPlaced = false;
+    myReady = false;
+    myState = makeEmptyBoard();
+    enemyState = makeEmptyBoard();
+    selectedShipIdx = 0;
+    renderFleet();
+    renderBoards();
+}
+
+function placeAt(x, y) {
+    // toggle ship cell placement using selected length; place as full ship, not per cell
+    const len = FLEET[selectedShipIdx];
+    if (!len) return;
+
+    // try place ship with current orientation starting at (x,y)
+    const coords = [];
+    for (let i = 0; i < len; i++) {
+        const nx = orientation === "H" ? x + i : x;
+        const ny = orientation === "H" ? y : y + i;
+        if (!isIn(nx, ny)) return;
+        coords.push([nx, ny]);
+    }
+
+    // must be empty and no neighbor touches
+    for (const [cx, cy] of coords) {
+        if (myPlacement[cy][cx] === 1) return;
+        for (const [nx, ny] of neighbors8(cx, cy)) {
+            if (myPlacement[ny][nx] === 1) return;
+        }
+    }
+
+    // place
+    for (const [cx, cy] of coords) {
+        myPlacement[cy][cx] = 1;
+        myState[cy][cx] = 1;
+    }
+
+    // advance ship selection (next)
+    selectedShipIdx = Math.min(selectedShipIdx + 1, FLEET.length - 1);
+    renderFleet();
+    renderBoards();
+
+    // if complete (matches fleet), auto-validate and send placement
+    if (validateFleet(myPlacement, FLEET)) {
+        myPlaced = true;
+        sendPlacement();
+    } else {
+        myPlaced = false;
+    }
+}
+
+function sendPlacement() {
+    if (!ws) return;
+    ws.send(JSON.stringify({ type: "place", board: myPlacement }));
+    toast("OK");
+}
+
+function setTexts() {
+    el.title.textContent = UI.title || "Battleship";
+    document.title = UI.title || "Battleship";
+    el.lblName.textContent = UI.enter_name || "Enter name";
+    el.lblRoomId.textContent = UI.room_id || "Room ID";
+    el.btnCreate.textContent = UI.create_room || "Create room";
+    el.btnJoin.textContent = UI.join_room || "Join room";
+    el.lblOrientation.textContent = UI.orientation || "Orientation";
+    el.btnOrient.textContent = (orientation === "H" ? (UI.horizontal || "Horizontal") : (UI.vertical || "Vertical"));
+    el.btnClear.textContent = UI.clear || "Clear";
+    el.btnReady.textContent = myReady ? (UI.ready || "Ready") : (UI.ready || "Ready");
+    el.fleetLabel.textContent = (UI.fleet_label || "Fleet");
+    el.lblMyBoard.textContent = "My board";
+    el.lblEnemyBoard.textContent = "Enemy board";
+    el.enemyHint.textContent = phase === "battle" ? "" : (UI.lobby_ready_hint || "");
+}
+
+function setStatus(main, sub="") {
+    el.status.textContent = main || "—";
+    el.substatus.textContent = sub || "";
+}
+
+function connect(roomId, lang, name) {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws/${roomId}`);
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({ type: "join", lang, name }));
+    };
+
+    ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+
+        if (msg.type === "error") {
+            toast(msg.message || "Error");
+            return;
+        }
+        if (msg.type === "info") {
+            toast(msg.message || "Info");
+            return;
+        }
+
+        if (msg.type === "init") {
+            ROOM_ID = msg.room_id;
+            PID = msg.pid;
+            UI = msg.ui || {};
+            FLEET = msg.fleet || [];
+            BOARD_SIZE = msg.board_size || 10;
+
+            // init boards
+            clearPlacement();
+            setTexts();
+
+            // show link in roomId
+            el.roomId.value = ROOM_ID;
+            phase = "lobby";
+            setStatus(UI.place_ships || "Place ships", UI.waiting_opponent || "");
+            renderFleet();
+            renderBoards();
+            return;
+        }
+
+        if (msg.type === "state") {
+            phase = msg.phase || phase;
+
+            // update statuses
+            const players = msg.players || [];
+            const me = players.find(p => p.name === el.name.value.trim());
+            myReady = !!(me && me.ready);
+
+            if (phase === "lobby") {
+                setStatus(UI.place_ships || "Place ships", UI.lobby_ready_hint || "");
+            } else if (phase === "battle") {
+                // turn message arrives via "turn" or shot_result, but keep something
+                setStatus(yourTurn ? (UI.your_turn || "Your turn") : (UI.opponent_turn || "Opponent's turn"), "");
+            } else if (phase === "game_over") {
+                setStatus(UI.game_over || "Game over", msg.winner ? `Winner: ${msg.winner}` : "");
+            }
+
+            return;
+        }
+
+        if (msg.type === "phase") {
+            if (msg.phase === "battle") {
+                phase = "battle";
+                setStatus(UI.opponent_turn || "Opponent's turn", "");
+                el.enemyHint.textContent = "";
+                renderBoards();
+            }
+            return;
+        }
+
+        if (msg.type === "turn") {
+            yourTurn = !!msg.your_turn;
+            setStatus(msg.text || (yourTurn ? (UI.your_turn||"Your turn") : (UI.opponent_turn||"Opponent's turn")), "");
+            return;
+        }
+
+        if (msg.type === "shot_result") {
+            // result applies to enemy state (if you fired) or to your state (if opponent fired)
+            const { x, y, result, sunk_cells, fired_by_you } = msg;
+
+            if (fired_by_you) {
+                if (result === "hit" || result === "sunk") enemyState[y][x] = 2;
+                if (result === "miss") enemyState[y][x] = -1;
+            } else {
+                if (result === "hit" || result === "sunk") myState[y][x] = 2;
+                if (result === "miss") myState[y][x] = -1;
+            }
+
+            // if sunk, mark around sunk ship on enemy as miss (optional; keep simple)
+            if (fired_by_you && result === "sunk" && Array.isArray(sunk_cells)) {
+                // you may optionally mark around, but not required
+            }
+
+            yourTurn = !!msg.your_turn;
+            phase = msg.phase || phase;
+
+            if (msg.result_text) toast(msg.result_text);
+
+            if (phase === "battle") {
+                setStatus(yourTurn ? (UI.your_turn || "Your turn") : (UI.opponent_turn || "Opponent's turn"), "");
+            }
+
+            if (phase === "game_over") {
+                setStatus(UI.game_over || "Game over", msg.winner ? `Winner: ${msg.winner}` : "");
+            }
+
+            renderBoards();
+            return;
+        }
+
+        if (msg.type === "game_over") {
+            toast(msg.message || (UI.game_over || "Game over"));
+            phase = "game_over";
+            setStatus(UI.game_over || "Game over", msg.message || "");
+            return;
+        }
+    };
+
+    ws.onclose = () => {
+        ws = null;
+        phase = "disconnected";
+        setStatus("Disconnected", "");
+    };
+}
+
+// UI actions
+el.btnOrient.onclick = () => {
+    orientation = (orientation === "H") ? "V" : "H";
+    el.btnOrient.textContent = (orientation === "H" ? (UI.horizontal || "Horizontal") : (UI.vertical || "Vertical"));
+};
+
+el.btnClear.onclick = () => {
+    clearPlacement();
+    setTexts();
+    setStatus(UI.place_ships || "Place ships", UI.lobby_ready_hint || "");
+};
+
+el.btnReady.onclick = () => {
+    if (!ws) return;
+    if (!validateFleet(myPlacement, FLEET)) {
+        toast(UI.invalid_placement || "Invalid placement");
+        return;
+    }
+    ws.send(JSON.stringify({ type: "place", board: myPlacement }));
+    ws.send(JSON.stringify({ type: "set_ready", ready: true }));
+    myReady = true;
+    toast(UI.ready || "Ready");
+};
+
+el.btnCreate.onclick = async () => {
+    const lang = el.lang.value;
+    const name = el.name.value.trim();
+    if (!name) return toast(UI.enter_name || "Enter name");
+    const r = await fetch(`/create/${lang}`, { method: "POST" });
+    const data = await r.json();
+    el.roomId.value = data.room_id;
+    connect(data.room_id, lang, name);
+};
+
+el.btnJoin.onclick = async () => {
+    const lang = el.lang.value;
+    const name = el.name.value.trim();
+    const roomId = el.roomId.value.trim();
+    if (!name) return toast(UI.enter_name || "Enter name");
+    if (!roomId) return toast("Room ID required");
+    connect(roomId, lang, name);
+};
+
+el.copyLink.onclick = async () => {
+    const roomId = el.roomId.value.trim();
+    const url = new URL(location.href);
+    if (roomId) url.searchParams.set("room", roomId);
+    await navigator.clipboard.writeText(url.toString());
+    toast(UI.copied || "Copied!");
+};
+
+// preload room from URL
+(function initFromUrl() {
+    const url = new URL(location.href);
+    const room = url.searchParams.get("room");
+    if (room) el.roomId.value = room;
+    el.connHint.textContent = "Open this page in two browser tabs/windows to play.";
+})();

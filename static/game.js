@@ -376,7 +376,8 @@ function setTexts() {
     el.lblOrientation.textContent = UI.orientation || "Orientation";
     el.btnOrient.textContent = (orientation === "H" ? (UI.horizontal || "Horizontal") : (UI.vertical || "Vertical"));
     el.btnClear.textContent = UI.clear || "Clear";
-    el.btnReady.textContent = myReady ? (UI.ready || "Ready") : (UI.ready || "Ready");
+    // Button should reflect the action: if already ready -> allow unready; else -> ready up
+    el.btnReady.textContent = myReady ? (UI.not_ready || "Unready") : (UI.ready || "Ready");
     el.fleetLabel.textContent = (UI.fleet_label || "Fleet");
     // Fallback English labels for boards (not provided in UI)
     el.lblMyBoard.textContent = UI.my_board || "My board";
@@ -455,6 +456,8 @@ function connect(roomId, lang, name) {
             const players = msg.players || [];
             const me = players.find(p => p.name === el.name.value.trim());
             myReady = !!(me && me.ready);
+            // refresh UI texts that depend on readiness (button label, hints)
+            setTexts();
 
             if (phase === "lobby") {
                 setStatus(UI.place_ships || "Place ships", UI.lobby_ready_hint || "");
@@ -583,6 +586,14 @@ el.btnClear.onclick = () => {
 
 el.btnReady.onclick = () => {
     if (!ws) return;
+    // Toggle readiness: if currently ready -> unready; else -> validate and ready up
+    if (myReady) {
+        ws.send(JSON.stringify({ type: "set_ready", ready: false }));
+        myReady = false;
+        setTexts();
+        toast(UI.not_ready || "Not ready");
+        return;
+    }
     if (!validateFleet(myPlacement, FLEET)) {
         toast(UI.invalid_placement || "Invalid placement");
         return;
@@ -590,6 +601,7 @@ el.btnReady.onclick = () => {
     ws.send(JSON.stringify({ type: "place", board: myPlacement }));
     ws.send(JSON.stringify({ type: "set_ready", ready: true }));
     myReady = true;
+    setTexts();
     toast(UI.ready || "Ready");
 };
 

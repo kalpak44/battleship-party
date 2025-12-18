@@ -1,0 +1,73 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv
+venv/
+ENV/
+env/
+
+# =========================
+# Node / Tailwind
+# =========================
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+dist/
+.build/
+.out/
+
+# =========================
+# OS / Editors
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+
+# =========================
+# JetBrains IDEs
+# =========================
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# JetBrains specific caches
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+.idea/**/dictionaries
+.idea/**/shelf
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Docker
+# =========================
+*.pid
+docker-data/
+docker-volume/
+
+# =========================
+# Tests / coverage
+# =========================
+.coverage
+htmlcov/
+pytest_cache/
+
+# =========================
+# Misc
+# =========================
+.cache/
+tmp/

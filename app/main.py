@@ -3,8 +3,11 @@ from __future__ import annotations
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 import uuid
 import re
+import os
+import random
 
 from app.rooms import rooms, create_room
 from app.game_data import GAME_DATA
@@ -18,12 +21,40 @@ from app.battleship import (
 ROOM_RE = re.compile(r"^\d{4}$")
 
 app = FastAPI()
+
+# CORS (configurable via ALLOWED_ORIGINS env, comma-separated). Defaults to allow current origin only via "*" for simplicity
+allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+allow_credentials = "*" not in allowed_origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/")
 def index():
     return FileResponse("static/index.html")
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/ui/{lang}")
+def get_ui_data(lang: str):
+    """Return UI strings and ship data for the requested language.
+    Falls back to English when lang is unknown.
+    """
+    lang = (lang or "").strip().lower()
+    if lang not in GAME_DATA:
+        lang = "en"
+    data = GAME_DATA[lang]
+    return {"ui": data["ui"], "ships": data.get("ships", {})}
 
 
 @app.post("/create/{lang}")
@@ -108,6 +139,7 @@ async def ws_room(ws: WebSocket, room_id: str):
 
         # only 2 players
         if len(room["players"]) >= 2 and pid not in room["players"]:
+            # use English fallback; could be extended to GAME_DATA if needed
             await safe_send(ws, {"type": "error", "message": "Room is full"})
             await ws.close(code=1008)
             return
@@ -181,9 +213,9 @@ async def ws_room(ws: WebSocket, room_id: str):
                 # start game if both ready
                 if len(room["players"]) == 2 and all(x.get("ready") for x in room["players"].values()):
                     room["phase"] = "battle"
-                    # choose first turn deterministically by sorted name to keep stable (or random)
+                    # choose first turn randomly to be fair
                     pids = list(room["players"].keys())
-                    room["turn"] = pids[0]
+                    room["turn"] = random.choice(pids)
                     await broadcast(room, {"type": "phase", "phase": "battle"})
                     await broadcast(room, room_snapshot(room))
                     # notify whose turn per player
@@ -194,6 +226,23 @@ async def ws_room(ws: WebSocket, room_id: str):
                             "your_turn": (room["turn"] == apid),
                             "text": aui["your_turn"] if room["turn"] == apid else aui["opponent_turn"],
                         })
+
+            # Update player's language preference during a session
+            elif t == "set_lang":
+                p = room["players"].get(pid)
+                if not p:
+                    continue
+                new_lang = (msg.get("lang") or p["lang"]).strip().lower()
+                if new_lang not in GAME_DATA:
+                    new_lang = p["lang"]
+                p["lang"] = new_lang
+                # Send updated UI to the requester and refresh state for everyone
+                await safe_send(p["ws"], {
+                    "type": "init_ui",
+                    "ui": GAME_DATA[new_lang]["ui"],
+                    "fleet": GAME_DATA[new_lang]["ships"]["fleet"],
+                })
+                await broadcast(room, room_snapshot(room))
 
             # Shooting
             elif t == "shot":
@@ -222,8 +271,9 @@ async def ws_room(ws: WebSocket, room_id: str):
                     await safe_send(ws, {"type": "error", "message": get_ui(shooter["lang"], room)["invalid_move"]})
                     continue
 
-                # if repeat, don't swap turn
-                if res != "repeat":
+                # Turn rules: shooter continues on hit/sunk; switch only on miss.
+                # "repeat" (already fired cell) leaves turn unchanged.
+                if res == "miss":
                     room["turn"] = op_pid
 
                 # check win
@@ -283,10 +333,26 @@ async def ws_room(ws: WebSocket, room_id: str):
             room = rooms[room_id]
             left = room["players"].pop(pid, None)
             if room["players"]:
-                # notify remaining player
-                for ap in room["players"].values():
-                    aui = get_ui(ap["lang"], room)
-                    await safe_send(ap["ws"], {"type": "info", "message": aui["opponent_left"]})
+                # if we were mid-battle, declare winner as the one who stayed
+                if room.get("phase") == "battle":
+                    # the only remaining player wins
+                    remaining_pid = next(iter(room["players"].keys()))
+                    winner_name = room["players"][remaining_pid]["name"]
+                    room["phase"] = "game_over"
+                    room["winner"] = winner_name
+                    # notify remaining player with localized message
+                    for apid, ap in room["players"].items():
+                        aui = get_ui(ap["lang"], room)
+                        await safe_send(ap["ws"], {
+                            "type": "game_over",
+                            "message": aui.get("you_win", "You win!"),
+                        })
+                else:
+                    # lobby or already game over: just inform
+                    for ap in room["players"].values():
+                        aui = get_ui(ap["lang"], room)
+                        await safe_send(ap["ws"], {"type": "info", "message": aui["opponent_left"]})
+
                 await broadcast(room, room_snapshot(room))
             else:
                 rooms.pop(room_id, None)

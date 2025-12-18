@@ -3,7 +3,6 @@ const $ = (id) => document.getElementById(id);
 const el = {
     title: $("title"),
     lang: $("lang"),
-    copyLink: $("copyLink"),
     lblName: $("lblName"),
     lblRoomId: $("lblRoomId"),
     btnCreate: $("btnCreate"),
@@ -25,6 +24,11 @@ const el = {
     toast: $("toast"),
     lblMyBoard: $("lblMyBoard"),
     lblEnemyBoard: $("lblEnemyBoard"),
+    // modal elements
+    overlay: $("overlay"),
+    modalTitle: $("modalTitle"),
+    modalMsg: $("modalMsg"),
+    btnModalOk: $("btnModalOk"),
 };
 
 let ws = null;
@@ -50,6 +54,16 @@ function toast(msg) {
     el.toast.textContent = msg;
     el.toast.classList.remove("hidden");
     setTimeout(() => el.toast.classList.add("hidden"), 1600);
+}
+
+function showModal(title, message) {
+    if (title) el.modalTitle.textContent = title;
+    if (message) el.modalMsg.textContent = message;
+    el.overlay.classList.remove("hidden");
+}
+
+function hideModal() {
+    el.overlay.classList.add("hidden");
 }
 
 function makeEmptyBoard() {
@@ -149,6 +163,51 @@ function validateFleet(board, fleet) {
     return true;
 }
 
+// helpers to compute placed ship components and counts by length
+function components4(board) {
+    const vis = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(false));
+    const comps = [];
+    function dfs(sx, sy) {
+        const stack = [[sx, sy]];
+        vis[sy][sx] = true;
+        const comp = [];
+        while (stack.length) {
+            const [x, y] = stack.pop();
+            comp.push([x, y]);
+            for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                const nx = x + dx, ny = y + dy;
+                if (isIn(nx, ny) && !vis[ny][nx] && board[ny][nx] === 1) {
+                    vis[ny][nx] = true;
+                    stack.push([nx, ny]);
+                }
+            }
+        }
+        return comp;
+    }
+    for (let y = 0; y < BOARD_SIZE; y++) {
+        for (let x = 0; x < BOARD_SIZE; x++) {
+            if (board[y][x] === 1 && !vis[y][x]) comps.push(dfs(x, y));
+        }
+    }
+    return comps;
+}
+
+function fleetAllowedCounts(fleet) {
+    const counts = new Map();
+    for (const len of fleet) counts.set(len, (counts.get(len) || 0) + 1);
+    return counts;
+}
+
+function fleetPlacedCounts(board) {
+    const comps = components4(board);
+    const counts = new Map();
+    for (const comp of comps) {
+        const l = comp.length;
+        counts.set(l, (counts.get(l) || 0) + 1);
+    }
+    return counts;
+}
+
 function renderBoards() {
     el.myBoard.innerHTML = "";
     el.enemyBoard.innerHTML = "";
@@ -200,6 +259,19 @@ function renderBoards() {
             el.enemyBoard.appendChild(cell);
         }
     }
+
+    // Visual guidance for turns on the enemy board container
+    if (phase === "battle") {
+        if (yourTurn) {
+            el.enemyBoard.classList.remove("pointer-events-none", "opacity-60", "ring-0");
+            el.enemyBoard.classList.add("ring", "ring-emerald-600/60", "ring-offset-1", "ring-offset-slate-900");
+        } else {
+            el.enemyBoard.classList.add("pointer-events-none", "opacity-60");
+            el.enemyBoard.classList.remove("ring", "ring-emerald-600/60", "ring-offset-1", "ring-offset-slate-900");
+        }
+    } else {
+        el.enemyBoard.classList.remove("pointer-events-none", "opacity-60", "ring", "ring-emerald-600/60", "ring-offset-1", "ring-offset-slate-900");
+    }
 }
 
 function baseCellClass() {
@@ -250,6 +322,16 @@ function placeAt(x, y) {
         }
     }
 
+    // enforce fleet counts: do not exceed number of ships of this length
+    const allowed = fleetAllowedCounts(FLEET);
+    const placed = fleetPlacedCounts(myPlacement);
+    const already = placed.get(len) || 0;
+    const canHave = allowed.get(len) || 0;
+    if (already >= canHave) {
+        toast(UI.invalid_placement || "Invalid placement");
+        return;
+    }
+
     // place
     for (const [cx, cy] of coords) {
         myPlacement[cy][cx] = 1;
@@ -257,7 +339,15 @@ function placeAt(x, y) {
     }
 
     // advance ship selection (next)
-    selectedShipIdx = Math.min(selectedShipIdx + 1, FLEET.length - 1);
+    // move to next ship that is not yet fully placed
+    const placedAfter = fleetPlacedCounts(myPlacement);
+    let nextIdx = selectedShipIdx;
+    for (let i = 0; i < FLEET.length; i++) {
+        const idx = (selectedShipIdx + 1 + i) % FLEET.length;
+        const l = FLEET[idx];
+        if ((placedAfter.get(l) || 0) < (allowed.get(l) || 0)) { nextIdx = idx; break; }
+    }
+    selectedShipIdx = nextIdx;
     renderFleet();
     renderBoards();
 
@@ -288,14 +378,26 @@ function setTexts() {
     el.btnClear.textContent = UI.clear || "Clear";
     el.btnReady.textContent = myReady ? (UI.ready || "Ready") : (UI.ready || "Ready");
     el.fleetLabel.textContent = (UI.fleet_label || "Fleet");
-    el.lblMyBoard.textContent = "My board";
-    el.lblEnemyBoard.textContent = "Enemy board";
+    // Fallback English labels for boards (not provided in UI)
+    el.lblMyBoard.textContent = UI.my_board || "My board";
+    el.lblEnemyBoard.textContent = UI.enemy_board || "Enemy board";
     el.enemyHint.textContent = phase === "battle" ? "" : (UI.lobby_ready_hint || "");
 }
 
 function setStatus(main, sub="") {
     el.status.textContent = main || "—";
     el.substatus.textContent = sub || "";
+
+    // colorize banner by turn
+    if (phase === "battle") {
+        if (yourTurn) {
+            el.status.className = "text-sm text-emerald-400";
+        } else {
+            el.status.className = "text-sm text-amber-400";
+        }
+    } else {
+        el.status.className = "text-sm text-slate-300";
+    }
 }
 
 function connect(roomId, lang, name) {
@@ -338,6 +440,14 @@ function connect(roomId, lang, name) {
             return;
         }
 
+        if (msg.type === "init_ui") {
+            if (msg.ui) UI = msg.ui;
+            // Do not overwrite current fleet/boards on-the-fly; only refresh texts
+            setTexts();
+            renderFleet();
+            return;
+        }
+
         if (msg.type === "state") {
             phase = msg.phase || phase;
 
@@ -348,9 +458,14 @@ function connect(roomId, lang, name) {
 
             if (phase === "lobby") {
                 setStatus(UI.place_ships || "Place ships", UI.lobby_ready_hint || "");
+                // show both players' readiness
+                const readySummary = players.map(p => `${p.name || "?"}: ${p.ready ? (UI.ready||"Ready") : (UI.not_ready||"Not ready")}`).join(" · ");
+                el.substatus.textContent = readySummary;
             } else if (phase === "battle") {
                 // turn message arrives via "turn" or shot_result, but keep something
-                setStatus(yourTurn ? (UI.your_turn || "Your turn") : (UI.opponent_turn || "Opponent's turn"), "");
+                const turnName = msg.turn_name ? `(${msg.turn_name})` : "";
+                setStatus(yourTurn ? (UI.your_turn || "Your turn") : (UI.opponent_turn || "Opponent's turn"), turnName);
+                renderBoards();
             } else if (phase === "game_over") {
                 setStatus(UI.game_over || "Game over", msg.winner ? `Winner: ${msg.winner}` : "");
             }
@@ -371,6 +486,7 @@ function connect(roomId, lang, name) {
         if (msg.type === "turn") {
             yourTurn = !!msg.your_turn;
             setStatus(msg.text || (yourTurn ? (UI.your_turn||"Your turn") : (UI.opponent_turn||"Opponent's turn")), "");
+            renderBoards();
             return;
         }
 
@@ -386,9 +502,19 @@ function connect(roomId, lang, name) {
                 if (result === "miss") myState[y][x] = -1;
             }
 
-            // if sunk, mark around sunk ship on enemy as miss (optional; keep simple)
+            // if sunk, mark around sunk ship on enemy as miss to avoid meaningless shots
             if (fired_by_you && result === "sunk" && Array.isArray(sunk_cells)) {
-                // you may optionally mark around, but not required
+                // sunk_cells is array of [x,y] pairs
+                const seen = new Set(sunk_cells.map(([cx, cy]) => `${cx},${cy}`));
+                for (const [sx, sy] of sunk_cells) {
+                    for (const [nx, ny] of neighbors8(sx, sy)) {
+                        const key = `${nx},${ny}`;
+                        if (seen.has(key)) continue; // part of the sunk ship
+                        if (enemyState[ny][nx] === 0) {
+                            enemyState[ny][nx] = -1; // mark as miss
+                        }
+                    }
+                }
             }
 
             yourTurn = !!msg.your_turn;
@@ -409,9 +535,11 @@ function connect(roomId, lang, name) {
         }
 
         if (msg.type === "game_over") {
-            toast(msg.message || (UI.game_over || "Game over"));
+            const message = msg.message || (UI.game_over || "Game over");
+            toast(message);
             phase = "game_over";
-            setStatus(UI.game_over || "Game over", msg.message || "");
+            setStatus(UI.game_over || "Game over", message || "");
+            showModal(UI.game_over || "Game over", message);
             return;
         }
     };
@@ -424,6 +552,24 @@ function connect(roomId, lang, name) {
 }
 
 // UI actions
+async function loadLanguage(lang) {
+    try {
+        const r = await fetch(`/ui/${lang}`);
+        const data = await r.json();
+        if (data && data.ui) {
+            UI = data.ui;
+            setTexts();
+        }
+    } catch {}
+}
+
+el.lang.onchange = async () => {
+    const lang = el.lang.value;
+    await loadLanguage(lang);
+    if (ws) {
+        ws.send(JSON.stringify({ type: "set_lang", lang }));
+    }
+};
 el.btnOrient.onclick = () => {
     orientation = (orientation === "H") ? "V" : "H";
     el.btnOrient.textContent = (orientation === "H" ? (UI.horizontal || "Horizontal") : (UI.vertical || "Vertical"));
@@ -466,13 +612,6 @@ el.btnJoin.onclick = async () => {
     connect(roomId, lang, name);
 };
 
-el.copyLink.onclick = async () => {
-    const roomId = el.roomId.value.trim();
-    const url = new URL(location.href);
-    if (roomId) url.searchParams.set("room", roomId);
-    await navigator.clipboard.writeText(url.toString());
-    toast(UI.copied || "Copied!");
-};
 
 // preload room from URL
 (function initFromUrl() {
@@ -480,4 +619,11 @@ el.copyLink.onclick = async () => {
     const room = url.searchParams.get("room");
     if (room) el.roomId.value = room;
     el.connHint.textContent = "Open this page in two browser tabs/windows to play.";
+    // initialize UI texts for current language selection
+    loadLanguage(el.lang.value);
 })();
+
+// modal ok
+if (el.btnModalOk) {
+    el.btnModalOk.onclick = () => hideModal();
+}

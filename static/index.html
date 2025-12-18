@@ -23,9 +23,11 @@
         </div>
     </div>
 
-    <!-- Connection -->
-    <div class="mt-4 grid md:grid-cols-3 gap-4">
-        <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+    <!-- Screens wrapper -->
+    <div class="mt-4">
+      <!-- Home screen: login / room creation -->
+      <div id="screenHome" class="grid md:grid-cols-3 gap-4">
+        <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-4 md:col-span-3 md:max-w-xl">
             <div class="text-sm text-slate-300 mb-2" id="lblName">Enter name</div>
             <input id="name" class="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2" placeholder="Username" />
             <div class="mt-3 text-sm text-slate-300 mb-2" id="lblRoomId">Room ID</div>
@@ -36,9 +38,11 @@
             </div>
             <p class="mt-3 text-sm text-slate-300" id="connHint"></p>
         </div>
+      </div>
 
-        <!-- Placement -->
-        <div class="md:col-span-2 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+      <!-- Game screen: placement + boards -->
+      <div id="screenGame" class="hidden">
+        <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <div class="text-sm text-slate-300" id="status">—</div>
@@ -67,6 +71,7 @@
                 </div>
             </div>
         </div>
+      </div>
     </div>
 
     <div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 bg-slate-800 border border-slate-700 text-sm px-4 py-2 rounded-lg hidden"></div>

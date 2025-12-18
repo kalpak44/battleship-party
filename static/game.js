@@ -3,6 +3,8 @@ const $ = (id) => document.getElementById(id);
 const el = {
     title: $("title"),
     lang: $("lang"),
+    screenHome: $("screenHome"),
+    screenGame: $("screenGame"),
     lblName: $("lblName"),
     lblRoomId: $("lblRoomId"),
     btnCreate: $("btnCreate"),
@@ -49,6 +51,45 @@ let myReady = false;
 let myState = makeEmptyBoard();    // for display: 0 water, 1 ship, 2 hit, -1 miss
 let enemyState = makeEmptyBoard(); // only hits/misses on enemy
 let yourTurn = false;
+
+function showScreen(which) {
+    if (!el.screenHome || !el.screenGame) return;
+    if (which === "game") {
+        el.screenHome.classList.add("hidden");
+        el.screenGame.classList.remove("hidden");
+    } else {
+        el.screenGame.classList.add("hidden");
+        el.screenHome.classList.remove("hidden");
+    }
+}
+
+function resetToHome() {
+    try { if (ws) ws.close(); } catch (_) {}
+    ws = null;
+    ROOM_ID = null;
+    PID = null;
+    UI = UI || {};
+    FLEET = [];
+    BOARD_SIZE = 10;
+    phase = "disconnected";
+    orientation = "H";
+    selectedShipIdx = 0;
+    myPlacement = makeEmptyBoard();
+    myPlaced = false;
+    myReady = false;
+    myState = makeEmptyBoard();
+    enemyState = makeEmptyBoard();
+    yourTurn = false;
+    // clear UI containers
+    if (el.fleet) el.fleet.innerHTML = "";
+    if (el.myBoard) el.myBoard.innerHTML = "";
+    if (el.enemyBoard) el.enemyBoard.innerHTML = "";
+    setTexts();
+    setStatus(UI.title || "Battleship", "");
+    // remove room param from URL
+    try { history.replaceState(null, "", location.pathname); } catch (_) {}
+    showScreen("home");
+}
 
 function toast(msg) {
     el.toast.textContent = msg;
@@ -438,6 +479,7 @@ function connect(roomId, lang, name) {
             setStatus(UI.place_ships || "Place ships", UI.waiting_opponent || "");
             renderFleet();
             renderBoards();
+            showScreen("game");
             return;
         }
 
@@ -551,6 +593,8 @@ function connect(roomId, lang, name) {
         ws = null;
         phase = "disconnected";
         setStatus("Disconnected", "");
+        // Return to home if connection drops
+        showScreen("home");
     };
 }
 
@@ -637,5 +681,5 @@ el.btnJoin.onclick = async () => {
 
 // modal ok
 if (el.btnModalOk) {
-    el.btnModalOk.onclick = () => hideModal();
+    el.btnModalOk.onclick = () => { hideModal(); resetToHome(); };
 }

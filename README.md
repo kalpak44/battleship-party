@@ -59,11 +59,9 @@
 Open the game at: http://localhost:8000
 
 ## Notes
-- Room codes are 4 digits; rooms are destroyed automatically when empty.
-- State is in-process memory; run a single instance, or use a shared store (e.g., Redis) if you plan to scale horizontally.
-- For public hosting, place behind HTTPS and a reverse proxy/ingress.
+- Room codes are four digits; rooms are destroyed automatically when empty.
+- State is in-process memory; run a single instance or use a shared store (e.g., Redis) if you plan to scale horizontally.
 - Touch interactions and layout are optimized for mobile.
-
 ---
 
 Have fun — and good hunting!
